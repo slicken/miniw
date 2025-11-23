@@ -48,8 +48,8 @@ Action Commands
   --rpc <url>              Custom RPC endpoint for the chosen network (Optional)
 
 Examples:
-  ./miniw btc --privatekey=5KJvsngHeMpm884wtkJHQtFvi... --balance
-  ./miniw eth --privatekey=ddcc8e6a9be77249cb44a7d3b... --balance --rpc=ETH_L2_RPC
+  ./miniw btc --balance=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
+  ./miniw eth --balance=0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6 --rpc=ETH_L2_RPC
   ./miniw sol --mnemonic="abandon abandon abandon..." --send --amount=0.1 --to=8TinVypdVXQcLoTkr2ezbVumquEoWpt...
 ```
 
@@ -63,7 +63,7 @@ Examples:
 ./miniw btc -i=hoho
 
 # Generate Ethereum key pair with 'xyz' postfix in public key
-./miniw eth --i=xyz --postfix
+./miniw eth -i=xyz --postfix
 
 # Generate Solana key pair with both prefix and postfix
 ./miniw sol -i=ok --prefix --postfix
