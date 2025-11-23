@@ -31,25 +31,25 @@ Network (required as first argument):
 Wallet Options:
   -a, --all                Prints mnemonic and derivation path
   -i, --include <include>  Include words in public key (comma-separated)
-      --prefix             Addon for include (Optional for key-pair gen.)
-      --postfix            Addon for include (Optional for key-pair gen.)
+      --prefix             Addon for include (optional for key-pair gen.)
+      --postfix            Addon for include (optional for key-pair gen.)
                            Example: -i abcde,10000
-  --custom_private         Use custom private key
-  --custom_mnemonic        Use custom mnemonic
-  --custom_path            Use custom derivation path (Optional)
+  --privatekey             Use custom private key
+  --mnemonic               Use custom mnemonic
+  --path                   Use custom derivation path (optional)
 
-Action Commands (Mnemonic or Private Key required)
-  --balance                Check balance for generated wallet
-  --send                   Send cryptocurrency
+Action Commands:
+  --balance <wallet>       Check balance for wallet address
+  --send                   Send cryptocurrency (requires --privatekey or --mnemonic)
     --amount <amount>      Amount to send
     --to <address>         Destination address
-      --token <address>    Custom Token contract address (Optional)
-  --rpc <url>              Custom RPC endpoint for the chosen network (Optional)
+      --token <address>    Custom Token contract address (optional)
+  --rpc <url>              Custom RPC endpoint for the chosen network (optional)
 
 Examples:
-  %s btc --custom_private=5KJvsngHeMpm884wtkJHQtFvi... --balance
-  %s eth --custom_private=ddcc8e6a9be77249cb44a7d3b... --balance --rpc=ETH_L2_RPC
-  %s sol --custom_mnemonic="abandon abandon abandon..." --send --amount=0.1 --to=8TinVypdVXQcLoTkr2ezbVumquEoWpt...
+  %s btc --balance=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
+  %s eth --balance=0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6 --rpc=ETH_L2_RPC
+  %s sol --mnemonic="abandon abandon abandon..." --send --amount=0.1 --to=8TinVypdVXQcLoTkr2ezbVumquEoWpt...
 `, os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 	os.Exit(1)
 }
@@ -78,12 +78,12 @@ var (
 	postFlag           = flag.Bool("postfix", false, "Addon to include flag.")
 	infoFlag           = flag.Bool("a", false, "A boolean flag to generate and print a mnemonic.")
 	infoLongFlag       = flag.Bool("all", false, "A boolean flag to generate and print a mnemonic.")
-	customMnemonicFlag = flag.String("custom_mnemonic", "", "Custom mnemonic phrase for key generation.")
-	customPathFlag     = flag.String("custom_path", "", "Custom derivation path for key generation.")
-	customPrivateFlag  = flag.String("custom_private", "", "Custom private key for key generation.")
+	customMnemonicFlag = flag.String("mnemonic", "", "Custom mnemonic phrase for key generation.")
+	customPathFlag     = flag.String("path", "", "Custom derivation path for key generation.")
+	customPrivateFlag  = flag.String("privatekey", "", "Custom private key for key generation.")
 
 	// Action command flags
-	balanceFlag = flag.Bool("balance", false, "Check balance for generated wallet.")
+	balanceFlag = flag.String("balance", "", "Check balance for wallet address.")
 	sendFlag    = flag.Bool("send", false, "Send cryptocurrency.")
 	amountFlag  = flag.String("amount", "", "Amount to send.")
 	toFlag      = flag.String("to", "", "Destination address.")
@@ -150,20 +150,18 @@ func main() {
 		log.Fatalln(networkArg, err)
 	}
 
-	// Check if balance or send commands are requested
-	if *balanceFlag || *sendFlag {
-		// Validate that mnemonic or private key is provided for action commands
-		if customMnemonic == "" && customPrivate == "" {
-			log.Fatal("Error: Action commands (--balance, --send) require either --custom_mnemonic or --custom_private to be provided.")
-		}
-	}
-
-	if *balanceFlag {
-		handleBalanceCommand(keyPair, networkArg)
+	// Check if balance command is requested
+	if *balanceFlag != "" {
+		handleBalanceCommand(*balanceFlag, networkArg)
 		return
 	}
 
+	// Check if send command is requested
 	if *sendFlag {
+		// Validate that mnemonic or private key is provided for send command
+		if customMnemonic == "" && customPrivate == "" {
+			log.Fatal("Error: --send requires either --mnemonic or --privatekey to be provided.")
+		}
 		handleSendCommand(keyPair, networkArg)
 		return
 	}
@@ -231,47 +229,52 @@ func main() {
 	}
 }
 
-// handleBalanceCommand processes balance checking using generated keypair
-func handleBalanceCommand(keyPair *KeyPair, networkArg string) {
+// handleBalanceCommand processes balance checking using wallet address
+func handleBalanceCommand(walletAddress string, networkArg string) {
+	// Validate wallet address is provided
+	if walletAddress == "" {
+		log.Fatalln("Error: wallet address is missing. Please provide a wallet address after --balance.")
+	}
+
 	// Determine network type and call appropriate function
 	switch strings.ToLower(networkArg) {
 	case "btc", "legacy", "bitcoin":
-		balance, err := GetBitcoinBalance(keyPair.public, "legacy", *rpcFlag)
+		balance, err := GetBitcoinBalance(walletAddress, "legacy", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Bitcoin balance: %v", err)
 		}
 		printBitcoinBalance(balance)
 
 	case "btcs", "segwit":
-		balance, err := GetBitcoinBalance(keyPair.public, "segwit", *rpcFlag)
+		balance, err := GetBitcoinBalance(walletAddress, "segwit", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Bitcoin SegWit balance: %v", err)
 		}
 		printBitcoinBalance(balance)
 
 	case "btcn", "native":
-		balance, err := GetBitcoinBalance(keyPair.public, "native_segwit", *rpcFlag)
+		balance, err := GetBitcoinBalance(walletAddress, "native_segwit", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Bitcoin Native SegWit balance: %v", err)
 		}
 		printBitcoinBalance(balance)
 
 	case "btct", "taproot":
-		balance, err := GetBitcoinBalance(keyPair.public, "taproot", *rpcFlag)
+		balance, err := GetBitcoinBalance(walletAddress, "taproot", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Bitcoin Taproot balance: %v", err)
 		}
 		printBitcoinBalance(balance)
 
 	case "eth", "ethereum":
-		balance, err := GetEthereumBalance(keyPair.public, "ethereum", *rpcFlag)
+		balance, err := GetEthereumBalance(walletAddress, "ethereum", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Ethereum balance: %v", err)
 		}
 		printEthereumBalance(balance)
 
 	case "sol", "solana":
-		balance, err := GetSolanaBalance(keyPair.public, *rpcFlag)
+		balance, err := GetSolanaBalance(walletAddress, *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to get Solana balance: %v", err)
 		}

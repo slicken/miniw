@@ -1,4 +1,4 @@
-module mmcw
+module miniw
 
 go 1.25.0
 
