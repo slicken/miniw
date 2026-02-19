@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 type KeyPair struct {
@@ -183,48 +187,107 @@ func main() {
 		return
 	}
 
-	// For the include/vanity address generation loop
-	count := 0
-	for {
-		keyPair, err := network.GenerateKeys()
-		if err != nil {
-			fmt.Println(networkArg, err)
-			return
-		}
+	// For the include/vanity address generation loop - use all CPU cores
+	numCPUs := runtime.NumCPU()
+	runtime.GOMAXPROCS(numCPUs)
 
-		for _, word := range includeWords {
-			if *preFlag {
-				if strings.EqualFold(keyPair.public[:len(word)], word) {
-					fmt.Printf("                 %s included as prefix in public key below\n", word)
-					keyPair.Print()
-					fmt.Println("")
-					count++
-					break
-				}
-			}
-			if *postFlag {
-				if strings.EqualFold(keyPair.public[len(keyPair.public)-len(word):], word) {
-					fmt.Printf("                 %s included as postfix in public key below\n", word)
-					keyPair.Print()
-					fmt.Println("")
-					count++
-					break
-				}
-			}
-			if !*preFlag && !*postFlag {
-				for i := 0; i < len(keyPair.public)-len(word)+1; i++ {
-					if strings.EqualFold(keyPair.public[i:i+len(word)], word) {
-						fmt.Printf("                 %s included in public key below\n", word)
-						keyPair.Print()
-						fmt.Println("")
-						count++
-						break
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultsCh := make(chan *KeyPair, numCPUs*2)
+	errCh := make(chan error, 1)
+
+	var wg sync.WaitGroup
+	searchMode := "in"
+	if *preFlag && *postFlag {
+		searchMode = "as prefix or postfix in"
+	} else if *preFlag {
+		searchMode = "as prefix in"
+	} else if *postFlag {
+		searchMode = "as postfix in"
+	}
+	fmt.Printf("Searching for [%s] %s public key (using %d CPU cores)...\n\n", strings.Join(includeWords, ", "), searchMode, numCPUs)
+
+	for i := 0; i < numCPUs; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					keyPair, err := network.GenerateKeys()
+					if err != nil {
+						select {
+						case errCh <- err:
+						default:
+						}
+						return
+					}
+
+					for _, word := range includeWords {
+						if *preFlag {
+							if len(keyPair.public) >= len(word) && strings.EqualFold(keyPair.public[:len(word)], word) {
+								select {
+								case resultsCh <- keyPair:
+								case <-ctx.Done():
+									return
+								}
+								break
+							}
+						}
+						if *postFlag {
+							if len(keyPair.public) >= len(word) && strings.EqualFold(keyPair.public[len(keyPair.public)-len(word):], word) {
+								select {
+								case resultsCh <- keyPair:
+								case <-ctx.Done():
+									return
+								}
+								break
+							}
+						}
+						if !*preFlag && !*postFlag {
+							for j := 0; j < len(keyPair.public)-len(word)+1; j++ {
+								if strings.EqualFold(keyPair.public[j:j+len(word)], word) {
+									select {
+									case resultsCh <- keyPair:
+									case <-ctx.Done():
+										return
+									}
+									break
+								}
+							}
+						}
 					}
 				}
 			}
-		}
-		if count > 10 {
-			break
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	count := int32(0)
+	for {
+		select {
+		case err := <-errCh:
+			cancel()
+			fmt.Println(networkArg, err)
+			return
+		case kp, ok := <-resultsCh:
+			if !ok {
+				return
+			}
+			kp.Print()
+			fmt.Println("")
+			if atomic.AddInt32(&count, 1) > 10 {
+				cancel()
+				return
+			}
 		}
 	}
 }
