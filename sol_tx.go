@@ -131,7 +131,7 @@ func GetSolanaBalance(address string, customRPC string) (*SolanaBalance, error) 
 }
 
 // SendSolana sends SOL from one address to another
-func SendSolana(privateKeyBase58, fromAddress, toAddress string, amount float64, customRPC string) (string, error) {
+func SendSolana(privateKeyBase58, fromAddress, toAddress string, amount string, customRPC string) (string, error) {
 	// Parse the private key
 	privateKey, err := sol.PrivateKeyFromBase58(privateKeyBase58)
 	if err != nil {
@@ -162,7 +162,10 @@ func SendSolana(privateKeyBase58, fromAddress, toAddress string, amount float64,
 	}
 
 	// Convert amount to lamports
-	amountLamports := uint64(amount * float64(sol.LAMPORTS_PER_SOL))
+	amountLamports, err := parseAmountToUint64(amount, 9)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount: %v", err)
+	}
 
 	if balance.Value < amountLamports {
 		return "", fmt.Errorf("insufficient SOL balance")
@@ -208,12 +211,12 @@ func SendSolana(privateKeyBase58, fromAddress, toAddress string, amount float64,
 		return "", fmt.Errorf("failed to send transaction: %v", err)
 	}
 
-	log.Printf("Solana transaction sent - Amount: %f SOL, TXID: %s", amount, sig.String())
+	log.Printf("Solana transaction sent - Amount: %s SOL, TXID: %s", amount, sig.String())
 	return sig.String(), nil
 }
 
 // SendSPLToken sends SPL tokens from one address to another
-func SendSPLToken(privateKeyBase58, fromAddress, toAddress, tokenMint string, amount float64, customRPC string) (string, error) {
+func SendSPLToken(privateKeyBase58, fromAddress, toAddress, tokenMint string, amount string, customRPC string) (string, error) {
 	// Parse the private key
 	privateKey, err := sol.PrivateKeyFromBase58(privateKeyBase58)
 	if err != nil {
@@ -277,8 +280,15 @@ func SendSPLToken(privateKeyBase58, fromAddress, toAddress, tokenMint string, am
 		currentAmount |= uint64(accountData[64+i]) << (8 * i)
 	}
 
-	// Convert amount to token units (assuming 9 decimals for most SPL tokens)
-	amountTokens := uint64(amount * 1e9)
+	tokenInfo, err := getTokenMetadataFromRPC(client, tokenMint)
+	if err != nil {
+		return "", fmt.Errorf("failed to get token mint decimals: %v", err)
+	}
+
+	amountTokens, err := parseAmountToUint64(amount, tokenInfo.Decimals)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount: %v", err)
+	}
 
 	if currentAmount < amountTokens {
 		return "", fmt.Errorf("insufficient token balance")
@@ -326,7 +336,7 @@ func SendSPLToken(privateKeyBase58, fromAddress, toAddress, tokenMint string, am
 		return "", fmt.Errorf("failed to send transaction: %v", err)
 	}
 
-	log.Printf("SPL token transaction sent - Amount: %f, Mint: %s, TXID: %s", amount, tokenMint, sig.String())
+	log.Printf("SPL token transaction sent - Amount: %s, Mint: %s, TXID: %s", amount, tokenMint, sig.String())
 	return sig.String(), nil
 }
 

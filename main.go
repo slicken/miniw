@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,8 +75,8 @@ type Network interface {
 }
 
 var (
-	includeFlag        = flag.String("i", "", "A comma-separated list of characters or words that the public key should include.")
-	includeLongFlag    = flag.String("include", "", "A comma-separated list of characters or words that the public key should include.")
+	includeFlag        = flag.String("i", "", "Vanity search: A comma-separated list of characters the public key should include.")
+	includeLongFlag    = flag.String("include", "", "Vanity search: A comma-separated list of characters the public key should include.")
 	preFlag            = flag.Bool("prefix", false, "Addon to include flag.")
 	postFlag           = flag.Bool("postfix", false, "Addon to include flag.")
 	infoFlag           = flag.Bool("a", false, "A boolean flag to generate and print a mnemonic.")
@@ -148,16 +147,16 @@ func main() {
 		log.Fatalf("%q not found\n", networkArg)
 	}
 
-	// Generate the keypair using existing logic
-	keyPair, err := network.GenerateKeys()
-	if err != nil {
-		log.Fatalln(networkArg, err)
-	}
-
 	// Check if balance command is requested
 	if *balanceFlag != "" {
 		handleBalanceCommand(*balanceFlag, networkArg)
 		return
+	}
+
+	// Generate the keypair using existing logic
+	keyPair, err := network.GenerateKeys()
+	if err != nil {
+		log.Fatalln(networkArg, err)
 	}
 
 	// Check if send command is requested
@@ -361,37 +360,31 @@ func handleSendCommand(keyPair *KeyPair, networkArg string) {
 		log.Fatal("Destination address is required for send command. Use --to flag.")
 	}
 
-	// Parse amount
-	amountFloat, err := strconv.ParseFloat(amount, 64)
-	if err != nil {
-		log.Fatalf("Invalid amount: %v", err)
-	}
-
 	// Determine network type and call appropriate function
 	switch strings.ToLower(networkArg) {
 	case "btc", "legacy", "bitcoin":
-		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amountFloat, "legacy", *rpcFlag)
+		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amount, "legacy", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to send Bitcoin: %v", err)
 		}
 		fmt.Printf("Bitcoin transaction sent successfully. TXID: %s\n", txHash)
 
 	case "btcs", "segwit":
-		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amountFloat, "segwit", *rpcFlag)
+		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amount, "segwit", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to send Bitcoin SegWit: %v", err)
 		}
 		fmt.Printf("Bitcoin SegWit transaction sent successfully. TXID: %s\n", txHash)
 
 	case "btcn", "native":
-		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amountFloat, "native_segwit", *rpcFlag)
+		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amount, "native_segwit", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to send Bitcoin Native SegWit: %v", err)
 		}
 		fmt.Printf("Bitcoin Native SegWit transaction sent successfully. TXID: %s\n", txHash)
 
 	case "btct", "taproot":
-		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amountFloat, "taproot", *rpcFlag)
+		txHash, err := SendBitcoin(keyPair.private, keyPair.public, to, amount, "taproot", *rpcFlag)
 		if err != nil {
 			log.Fatalf("Failed to send Bitcoin Taproot: %v", err)
 		}
@@ -400,14 +393,14 @@ func handleSendCommand(keyPair *KeyPair, networkArg string) {
 	case "eth", "ethereum":
 		if token != "" {
 			// Send ERC20 token
-			txHash, err := SendERC20Token(keyPair.private, keyPair.public, to, token, amountFloat, "ethereum", *rpcFlag)
+			txHash, err := SendERC20Token(keyPair.private, keyPair.public, to, token, amount, "ethereum", *rpcFlag)
 			if err != nil {
 				log.Fatalf("Failed to send ERC20 token: %v", err)
 			}
 			fmt.Printf("ERC20 token transaction sent successfully. TXID: %s\n", txHash)
 		} else {
 			// Send ETH
-			txHash, err := SendEthereum(keyPair.private, keyPair.public, to, amountFloat, "ethereum", *rpcFlag)
+			txHash, err := SendEthereum(keyPair.private, keyPair.public, to, amount, "ethereum", *rpcFlag)
 			if err != nil {
 				log.Fatalf("Failed to send Ethereum: %v", err)
 			}
@@ -417,14 +410,14 @@ func handleSendCommand(keyPair *KeyPair, networkArg string) {
 	case "sol", "solana":
 		if token != "" {
 			// Send SPL token
-			txHash, err := SendSPLToken(keyPair.private, keyPair.public, to, token, amountFloat, *rpcFlag)
+			txHash, err := SendSPLToken(keyPair.private, keyPair.public, to, token, amount, *rpcFlag)
 			if err != nil {
 				log.Fatalf("Failed to send SPL token: %v", err)
 			}
 			fmt.Printf("SPL token transaction sent successfully. TXID: %s\n", txHash)
 		} else {
 			// Send SOL
-			txHash, err := SendSolana(keyPair.private, keyPair.public, to, amountFloat, *rpcFlag)
+			txHash, err := SendSolana(keyPair.private, keyPair.public, to, amount, *rpcFlag)
 			if err != nil {
 				log.Fatalf("Failed to send Solana: %v", err)
 			}

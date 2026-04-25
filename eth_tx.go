@@ -200,120 +200,12 @@ func GetEthereumBalance(address string, networkName string, customRPC string) (*
 }
 
 // SendEthereum sends ETH from one address to another
-func SendEthereum(privateKeyHex, fromAddress, toAddress string, amount float64, networkName string, customRPC string) (string, error) {
+func SendEthereum(privateKeyHex, fromAddress, toAddress string, amount string, networkName string, customRPC string) (string, error) {
 	// Determine RPC endpoint and chain ID
 	var rpcEndpoint string
 	var chainID int64
 	if customRPC != "" {
 		rpcEndpoint = customRPC
-		// For custom RPC, we'll need to get chain ID from the network
-		// For now, default to mainnet chain ID
-		chainID = 1
-	} else {
-		// Find the network
-		var network EthereumNetwork
-		for _, n := range networks {
-			if strings.EqualFold(n.Name, networkName) {
-				network = n
-				break
-			}
-		}
-		if network.Name == "" {
-			return "", fmt.Errorf("unsupported network: %s", networkName)
-		}
-		rpcEndpoint = network.RPC
-		chainID = chainID
-	}
-
-	// Parse the private key
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse private key: %v", err)
-	}
-
-	// Connect to the network
-	client, err := ethclient.Dial(rpcEndpoint)
-	if err != nil {
-		return "", fmt.Errorf("failed to connect to RPC endpoint: %v", err)
-	}
-	defer client.Close()
-
-	// Parse addresses
-	fromAddr := common.HexToAddress(fromAddress)
-	toAddr := common.HexToAddress(toAddress)
-
-	// Check balance
-	balance, err := client.BalanceAt(context.Background(), fromAddr, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to get balance: %v", err)
-	}
-
-	// Convert amount to wei
-	amountWei := new(big.Int)
-	amountFloat := new(big.Float).SetFloat64(amount)
-	amountFloat.Mul(amountFloat, new(big.Float).SetInt(big.NewInt(1e18)))
-	amountFloat.Int(amountWei)
-
-	if balance.Cmp(amountWei) < 0 {
-		return "", fmt.Errorf("insufficient balance")
-	}
-
-	// Get gas price
-	gasPrice, err := client.SuggestGasPrice(context.Background())
-	if err != nil {
-		return "", fmt.Errorf("failed to get gas price: %v", err)
-	}
-
-	// Use higher gas price for faster confirmation
-	highGasPrice := new(big.Int).Mul(gasPrice, big.NewInt(2))
-
-	// Estimate gas limit
-	gasLimit := uint64(21000) // Standard ETH transfer
-
-	// Get nonce
-	nonce, err := client.PendingNonceAt(context.Background(), fromAddr)
-	if err != nil {
-		return "", fmt.Errorf("failed to get nonce: %v", err)
-	}
-
-	// Create transaction
-	tx := types.NewTransaction(
-		nonce,
-		toAddr,
-		amountWei,
-		gasLimit,
-		highGasPrice,
-		nil, // data
-	)
-
-	// Sign transaction
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(big.NewInt(chainID)), privateKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign transaction: %v", err)
-	}
-
-	// Send transaction
-	err = client.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		return "", fmt.Errorf("failed to send transaction: %v", err)
-	}
-
-	log.Printf("Ethereum transaction sent - Amount: %f ETH, TXID: %s",
-		amount, signedTx.Hash().Hex())
-
-	return signedTx.Hash().Hex(), nil
-}
-
-// SendERC20Token sends ERC20 tokens from one address to another
-func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, amount float64, networkName string, customRPC string) (string, error) {
-	// Determine RPC endpoint and chain ID
-	var rpcEndpoint string
-	var chainID int64
-	if customRPC != "" {
-		rpcEndpoint = customRPC
-		// For custom RPC, we'll need to get chain ID from the network
-		// For now, default to mainnet chain ID
-		chainID = 1
 	} else {
 		// Find the network
 		var network EthereumNetwork
@@ -343,6 +235,128 @@ func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, 
 	}
 	defer client.Close()
 
+	if customRPC != "" {
+		networkChainID, err := client.ChainID(context.Background())
+		if err != nil {
+			return "", fmt.Errorf("failed to get chain ID: %v", err)
+		}
+		chainID = networkChainID.Int64()
+	}
+
+	// Parse addresses
+	fromAddr := common.HexToAddress(fromAddress)
+	toAddr := common.HexToAddress(toAddress)
+
+	// Check balance
+	balance, err := client.BalanceAt(context.Background(), fromAddr, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get balance: %v", err)
+	}
+
+	// Convert amount to wei
+	amountWei, err := parseAmountToBaseUnits(amount, 18)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount: %v", err)
+	}
+
+	if balance.Cmp(amountWei) < 0 {
+		return "", fmt.Errorf("insufficient balance")
+	}
+
+	// Get gas price
+	gasPrice, err := client.SuggestGasPrice(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("failed to get gas price: %v", err)
+	}
+
+	// Use higher gas price for faster confirmation
+	highGasPrice := new(big.Int).Mul(gasPrice, big.NewInt(2))
+
+	// Estimate gas limit
+	gasLimit := uint64(21000) // Standard ETH transfer
+	totalCost := new(big.Int).Add(amountWei, new(big.Int).Mul(highGasPrice, new(big.Int).SetUint64(gasLimit)))
+	if balance.Cmp(totalCost) < 0 {
+		return "", fmt.Errorf("insufficient balance for amount and gas")
+	}
+
+	// Get nonce
+	nonce, err := client.PendingNonceAt(context.Background(), fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get nonce: %v", err)
+	}
+
+	// Create transaction
+	tx := types.NewTransaction(
+		nonce,
+		toAddr,
+		amountWei,
+		gasLimit,
+		highGasPrice,
+		nil, // data
+	)
+
+	// Sign transaction
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(big.NewInt(chainID)), privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Send transaction
+	err = client.SendTransaction(context.Background(), signedTx)
+	if err != nil {
+		return "", fmt.Errorf("failed to send transaction: %v", err)
+	}
+
+	log.Printf("Ethereum transaction sent - Amount: %s ETH, TXID: %s",
+		amount, signedTx.Hash().Hex())
+
+	return signedTx.Hash().Hex(), nil
+}
+
+// SendERC20Token sends ERC20 tokens from one address to another
+func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, amount string, networkName string, customRPC string) (string, error) {
+	// Determine RPC endpoint and chain ID
+	var rpcEndpoint string
+	var chainID int64
+	if customRPC != "" {
+		rpcEndpoint = customRPC
+	} else {
+		// Find the network
+		var network EthereumNetwork
+		for _, n := range networks {
+			if strings.EqualFold(n.Name, networkName) {
+				network = n
+				break
+			}
+		}
+		if network.Name == "" {
+			return "", fmt.Errorf("unsupported network: %s", networkName)
+		}
+		rpcEndpoint = network.RPC
+		chainID = network.ChainID
+	}
+
+	// Parse the private key
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse private key: %v", err)
+	}
+
+	// Connect to the network
+	client, err := ethclient.Dial(rpcEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to RPC endpoint: %v", err)
+	}
+	defer client.Close()
+
+	if customRPC != "" {
+		networkChainID, err := client.ChainID(context.Background())
+		if err != nil {
+			return "", fmt.Errorf("failed to get chain ID: %v", err)
+		}
+		chainID = networkChainID.Int64()
+	}
+
 	// Parse addresses
 	fromAddr := common.HexToAddress(fromAddress)
 	toAddr := common.HexToAddress(toAddress)
@@ -355,11 +369,10 @@ func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, 
 	}
 
 	// Convert amount to token units
-	amountTokens := new(big.Int)
-	amountFloat := new(big.Float).SetFloat64(amount)
-	divisor := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil))
-	amountFloat.Mul(amountFloat, divisor)
-	amountFloat.Int(amountTokens)
+	amountTokens, err := parseAmountToBaseUnits(amount, decimals)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount: %v", err)
+	}
 
 	if tokenBalance.Cmp(amountTokens) < 0 {
 		return "", fmt.Errorf("insufficient token balance")
@@ -375,15 +388,9 @@ func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, 
 	highGasPrice := new(big.Int).Mul(gasPrice, big.NewInt(2))
 
 	// ERC20 transfer function data
-	transferData := append(transferFunctionSignature, toAddr.Bytes()...)
-	amountBytes := amountTokens.Bytes()
-	if len(amountBytes) < 32 {
-		// Pad to 32 bytes
-		padded := make([]byte, 32)
-		copy(padded[32-len(amountBytes):], amountBytes)
-		amountBytes = padded
-	}
-	transferData = append(transferData, amountBytes...)
+	transferData := append([]byte{}, transferFunctionSignature...)
+	transferData = append(transferData, common.LeftPadBytes(toAddr.Bytes(), 32)...)
+	transferData = append(transferData, common.LeftPadBytes(amountTokens.Bytes(), 32)...)
 
 	// Estimate gas limit
 	gasLimit := uint64(100000) // Higher gas limit for token transfer
@@ -416,7 +423,7 @@ func SendERC20Token(privateKeyHex, fromAddress, toAddress, tokenAddress string, 
 		return "", fmt.Errorf("failed to send transaction: %v", err)
 	}
 
-	log.Printf("ERC20 token transaction sent - Amount: %f, TXID: %s",
+	log.Printf("ERC20 token transaction sent - Amount: %s, TXID: %s",
 		amount, signedTx.Hash().Hex())
 
 	return signedTx.Hash().Hex(), nil
@@ -430,7 +437,8 @@ func getERC20BalanceAndDecimals(client *ethclient.Client, tokenContract, address
 	decimalsSignature := crypto.Keccak256([]byte("decimals()"))[:4]
 
 	// Get balance
-	balanceData := append(balanceOfSignature, address.Bytes()...)
+	balanceData := append([]byte{}, balanceOfSignature...)
+	balanceData = append(balanceData, common.LeftPadBytes(address.Bytes(), 32)...)
 	balanceResult, err := client.CallContract(context.Background(), eth.CallMsg{
 		To:   &tokenContract,
 		Data: balanceData,

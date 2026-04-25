@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
@@ -36,19 +37,19 @@ var btcMap = map[string]bitcoin{
 }
 
 func (btc bitcoin) getParams() *chaincfg.Params {
-	param := &chaincfg.MainNetParams // Always use mainnet
+	param := chaincfg.MainNetParams // Always use mainnet
 	if btc.isSegWit {
 		if btc.isNative {
 			param.Bech32HRPSegwit = "bc" // Native SegWit Bech32 address prefix (mainnet)
 		} else {
-			param.PubKeyHashAddrID = 0x05 // SegWit P2SH address prefix (mainnet)
+			param.ScriptHashAddrID = 0x05 // SegWit P2SH address prefix (mainnet)
 		}
 		param.PrivateKeyID = 0x80 // SegWit private key prefix (mainnet)
 	} else {
 		param.PubKeyHashAddrID = 0x00 // Legacy P2PKH address prefix (mainnet)
 		param.PrivateKeyID = 0x80     // Legacy private key prefix (mainnet)
 	}
-	return param
+	return &param
 }
 
 func (btc bitcoin) createPrivateKey() (*btcutil.WIF, error) {
@@ -70,7 +71,7 @@ func (btc bitcoin) getAddress(wif *btcutil.WIF) (btcutil.Address, error) {
 		// Compute the Taproot output key
 		taprootKey := txscript.ComputeTaprootKeyNoScript(pubKey)
 		// Extract the x-coordinate of the public key (32 bytes)
-		taprootKeyBytes := taprootKey.X().Bytes()
+		taprootKeyBytes := schnorr.SerializePubKey(taprootKey)
 		// Create the Taproot address
 		addr, err := btcutil.NewAddressTaproot(taprootKeyBytes, btc.getParams())
 		if err != nil {
@@ -90,7 +91,15 @@ func (btc bitcoin) getAddress(wif *btcutil.WIF) (btcutil.Address, error) {
 
 	// Generate Segwit integrated withness (starts with '3')
 	if btc.isSegWit {
-		addr, err := btcutil.NewAddressScriptHash(btcutil.Hash160(pubKey.SerializeCompressed()), btc.getParams())
+		witnessAddr, err := btcutil.NewAddressWitnessPubKeyHash(btcutil.Hash160(pubKey.SerializeCompressed()), btc.getParams())
+		if err != nil {
+			return nil, err
+		}
+		witnessProgram, err := txscript.PayToAddrScript(witnessAddr)
+		if err != nil {
+			return nil, err
+		}
+		addr, err := btcutil.NewAddressScriptHash(witnessProgram, btc.getParams())
 		if err != nil {
 			return nil, err
 		}

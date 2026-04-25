@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -101,7 +100,7 @@ func GetBitcoinBalance(address string, addressType string, customRPC string) (*B
 }
 
 // SendBitcoin sends Bitcoin from one address to another
-func SendBitcoin(privateKeyWIF, fromAddress, toAddress string, amount float64, addressType string, customRPC string) (string, error) {
+func SendBitcoin(privateKeyWIF, fromAddress, toAddress string, amount string, addressType string, customRPC string) (string, error) {
 	// Parse the private key from WIF format
 	wif, err := btcutil.DecodeWIF(privateKeyWIF)
 	if err != nil {
@@ -198,12 +197,15 @@ func (rpc *BitcoinRPC) getBitcoinBalance(address string) (float64, []UTXO, error
 	return totalBalance, utxos, nil
 }
 
-func (rpc *BitcoinRPC) sendBitcoinTransaction(wif *btcutil.WIF, fromAddress, destAddress btcutil.Address, amount float64, utxos []UTXO, addressType string) (string, error) {
+func (rpc *BitcoinRPC) sendBitcoinTransaction(wif *btcutil.WIF, fromAddress, destAddress btcutil.Address, amount string, utxos []UTXO, addressType string) (string, error) {
 	// Create REAL Bitcoin transaction
 	tx := wire.NewMsgTx(wire.TxVersion)
 
 	// Convert amount to satoshis
-	amountSatoshis := int64(amount * btcutil.SatoshiPerBitcoin)
+	amountSatoshis, err := parseAmountToInt64(amount, 8)
+	if err != nil {
+		return "", fmt.Errorf("invalid amount: %v", err)
+	}
 
 	// Add inputs from real UTXOs
 	var totalInputValue int64
@@ -259,137 +261,99 @@ func (rpc *BitcoinRPC) sendBitcoinTransaction(wif *btcutil.WIF, fromAddress, des
 		return "", fmt.Errorf("failed to broadcast transaction: %v", err)
 	}
 
-	log.Printf("Bitcoin transaction sent - Amount: %f BTC, Fee: %f BTC, TXID: %s",
-		float64(amountSatoshis)/btcutil.SatoshiPerBitcoin, float64(fee)/btcutil.SatoshiPerBitcoin, txHash)
+	log.Printf("Bitcoin transaction sent - Amount: %s BTC, Fee: %f BTC, TXID: %s",
+		amount, float64(fee)/btcutil.SatoshiPerBitcoin, txHash)
 
 	return txHash, nil
 }
 
 func (rpc *BitcoinRPC) signBitcoinTransaction(tx *wire.MsgTx, wif *btcutil.WIF, address btcutil.Address, addressType string, utxos []UTXO) error {
-	// REAL Bitcoin transaction signing
-	for i, txIn := range tx.TxIn {
-		// Get the UTXO for this input
-		utxo := utxos[i]
+	sourcePkScript, err := txscript.PayToAddrScript(address)
+	if err != nil {
+		return fmt.Errorf("failed to create source script: %v", err)
+	}
 
-		// Create signature script based on address type
-		var sigScript []byte
-		var err error
+	prevOutFetcher := txscript.NewMultiPrevOutFetcher(nil)
+	for i, txIn := range tx.TxIn {
+		prevOutFetcher.AddPrevOut(txIn.PreviousOutPoint, wire.NewTxOut(utxos[i].Value, sourcePkScript))
+	}
+	sigHashes := txscript.NewTxSigHashes(tx, prevOutFetcher)
+
+	for i, txIn := range tx.TxIn {
+		utxo := utxos[i]
 
 		switch addressType {
 		case "legacy":
-			sigScript, err = rpc.createLegacySignatureScript(wif, txIn.PreviousOutPoint, utxo.Script, tx)
+			sigScript, err := txscript.SignatureScript(tx, i, sourcePkScript, txscript.SigHashAll, wif.PrivKey, true)
+			if err != nil {
+				return fmt.Errorf("failed to create legacy signature script for input %d: %v", i, err)
+			}
+			txIn.SignatureScript = sigScript
 		case "segwit":
-			sigScript, err = rpc.createSegWitSignatureScript(wif, txIn.PreviousOutPoint, utxo.Script, tx)
-			// For SegWit, also create witness data
-			if err == nil {
-				err = rpc.createSegWitWitness(tx, wif, i, utxo)
+			redeemScript, err := p2wpkhRedeemScript(wif)
+			if err != nil {
+				return fmt.Errorf("failed to create redeem script for input %d: %v", i, err)
+			}
+			sigScript, err := txscript.NewScriptBuilder().AddData(redeemScript).Script()
+			if err != nil {
+				return fmt.Errorf("failed to create segwit signature script for input %d: %v", i, err)
+			}
+			txIn.SignatureScript = sigScript
+			if err := createP2WPKHWitness(tx, sigHashes, wif, i, utxo); err != nil {
+				return fmt.Errorf("failed to create segwit witness for input %d: %v", i, err)
 			}
 		case "native_segwit":
-			sigScript, err = rpc.createSegWitSignatureScript(wif, txIn.PreviousOutPoint, utxo.Script, tx)
-			// For SegWit, also create witness data
-			if err == nil {
-				err = rpc.createSegWitWitness(tx, wif, i, utxo)
+			txIn.SignatureScript = nil
+			if err := createP2WPKHWitness(tx, sigHashes, wif, i, utxo); err != nil {
+				return fmt.Errorf("failed to create native segwit witness for input %d: %v", i, err)
 			}
 		case "taproot":
-			sigScript, err = rpc.createTaprootSignatureScript(wif, txIn.PreviousOutPoint, utxo.Script, tx)
+			txIn.SignatureScript = nil
+			witness, err := txscript.TaprootWitnessSignature(tx, sigHashes, i, utxo.Value, sourcePkScript, txscript.SigHashDefault, wif.PrivKey)
+			if err != nil {
+				return fmt.Errorf("failed to create taproot witness for input %d: %v", i, err)
+			}
+			txIn.Witness = witness
 		default:
 			return fmt.Errorf("unsupported address type for signing: %s", addressType)
 		}
-
-		if err != nil {
-			return fmt.Errorf("failed to create signature script for input %d: %v", i, err)
-		}
-
-		txIn.SignatureScript = sigScript
 	}
 
 	return nil
 }
 
-func (rpc *BitcoinRPC) createLegacySignatureScript(wif *btcutil.WIF, prevOut wire.OutPoint, scriptPubKey string, tx *wire.MsgTx) ([]byte, error) {
-	// REAL P2PKH signature creation
-	scriptBytes, err := hex.DecodeString(scriptPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid script: %v", err)
-	}
-
-	// Create signature hash
-	sigHash, err := txscript.CalcSignatureHash(scriptBytes, txscript.SigHashAll, tx, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate signature hash: %v", err)
-	}
-
-	// Sign with private key using ECDSA
-	signature := ecdsa.Sign(wif.PrivKey, sigHash)
-
-	// Create signature script
-	pubKey := wif.PrivKey.PubKey()
-	pubKeyBytes := pubKey.SerializeCompressed()
-
-	sigScript := make([]byte, 0)
-	sigScript = append(sigScript, byte(len(signature.Serialize())+1))
-	sigScript = append(sigScript, signature.Serialize()...)
-	sigScript = append(sigScript, 0x01) // SIGHASH_ALL
-	sigScript = append(sigScript, byte(len(pubKeyBytes)))
-	sigScript = append(sigScript, pubKeyBytes...)
-
-	return sigScript, nil
-}
-
-func (rpc *BitcoinRPC) createSegWitSignatureScript(wif *btcutil.WIF, prevOut wire.OutPoint, scriptPubKey string, tx *wire.MsgTx) ([]byte, error) {
-	// REAL P2WPKH signature creation - for SegWit, scriptSig should be empty
-	// The signature will be placed in the witness field
-	return []byte{}, nil
-}
-
-func (rpc *BitcoinRPC) createTaprootSignatureScript(wif *btcutil.WIF, prevOut wire.OutPoint, scriptPubKey string, tx *wire.MsgTx) ([]byte, error) {
-	// REAL P2TR signature creation
-	return rpc.createLegacySignatureScript(wif, prevOut, scriptPubKey, tx)
-}
-
-func (rpc *BitcoinRPC) createSegWitWitness(tx *wire.MsgTx, wif *btcutil.WIF, inputIndex int, utxo UTXO) error {
-	// Create witness for P2WPKH (Native SegWit)
+func p2wpkhRedeemScript(wif *btcutil.WIF) ([]byte, error) {
 	pubKey := wif.PrivKey.PubKey()
 	pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
+	witnessAddr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, &chaincfg.MainNetParams)
+	if err != nil {
+		return nil, err
+	}
+	return txscript.PayToAddrScript(witnessAddr)
+}
 
-	// Create the script for signature hash calculation
-	script, err := txscript.NewScriptBuilder().
+func p2wpkhScriptCode(wif *btcutil.WIF) ([]byte, error) {
+	pubKeyHash := btcutil.Hash160(wif.PrivKey.PubKey().SerializeCompressed())
+	return txscript.NewScriptBuilder().
 		AddOp(txscript.OP_DUP).
 		AddOp(txscript.OP_HASH160).
 		AddData(pubKeyHash).
 		AddOp(txscript.OP_EQUALVERIFY).
 		AddOp(txscript.OP_CHECKSIG).
 		Script()
+}
+
+func createP2WPKHWitness(tx *wire.MsgTx, sigHashes *txscript.TxSigHashes, wif *btcutil.WIF, inputIndex int, utxo UTXO) error {
+	script, err := p2wpkhScriptCode(wif)
 	if err != nil {
 		return fmt.Errorf("failed to create script: %v", err)
 	}
 
-	// Calculate signature hash for SegWit
-	// Create a simple prev output fetcher for the UTXO
-	prevOutFetcher := txscript.NewMultiPrevOutFetcher(nil)
-	prevOut := wire.NewTxOut(int64(utxo.Value), script)
-	prevOutFetcher.AddPrevOut(tx.TxIn[inputIndex].PreviousOutPoint, prevOut)
-
-	sigHash, err := txscript.CalcWitnessSigHash(script, txscript.NewTxSigHashes(tx, prevOutFetcher), txscript.SigHashAll, tx, inputIndex, int64(utxo.Value))
+	witness, err := txscript.WitnessSignature(tx, sigHashes, inputIndex, utxo.Value, script, txscript.SigHashAll, wif.PrivKey, true)
 	if err != nil {
-		return fmt.Errorf("failed to calculate witness signature hash: %v", err)
-	}
-
-	// Sign the hash
-	signature := ecdsa.Sign(wif.PrivKey, sigHash)
-
-	// Create witness stack
-	witness := wire.TxWitness{
-		append(signature.Serialize(), byte(txscript.SigHashAll)),
-		pubKey.SerializeCompressed(),
-	}
-
-	// Add witness to transaction
-	if tx.TxIn[inputIndex].Witness == nil {
-		tx.TxIn[inputIndex].Witness = make(wire.TxWitness, 0)
+		return fmt.Errorf("failed to create witness signature: %v", err)
 	}
 	tx.TxIn[inputIndex].Witness = witness
-
 	return nil
 }
 
