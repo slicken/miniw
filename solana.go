@@ -1,13 +1,15 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha512"
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/blocto/solana-go-sdk/types"
 	"github.com/btcsuite/btcd/btcutil/base58"
-	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"
 )
 
@@ -70,7 +72,7 @@ func (sol solana) GenerateKeys() (*KeyPair, error) {
 		// Set the derivation path
 		derivationPath = customPath
 		if derivationPath == "" {
-			derivationPath = "m/44'/501'/0'/0'" // Default Solana BIP-44 derivation path
+			derivationPath = solanaDefaultDerivationPath
 		}
 	} else if *infoFlag || *infoLongFlag {
 		// Generate a new mnemonic
@@ -99,7 +101,7 @@ func (sol solana) GenerateKeys() (*KeyPair, error) {
 			return nil, fmt.Errorf("failed to create wallet from seed: %v", err)
 		}
 
-		derivationPath = "m/44'/501'/0'/0'"
+		derivationPath = solanaDefaultDerivationPath
 	} else {
 		// Generate a new wallet with a random mnemonic (not exposed)
 		wallet = types.NewAccount()
@@ -119,10 +121,14 @@ func (sol solana) GenerateKeys() (*KeyPair, error) {
 	return k, nil
 }
 
-// deriveSolanaPrivateKey derives the private key from the seed using the BIP-44 derivation path
+const (
+	solanaDefaultDerivationPath = "m/44'/501'/0'/0'"
+	hardenedKeyStart            = uint32(0x80000000)
+)
+
+// deriveSolanaPrivateKey derives the Ed25519 seed using SLIP-0010 hardened derivation.
 func deriveSolanaPrivateKey(seed []byte, customPath string) ([]byte, error) {
-	// Default Solana BIP-44 derivation path
-	derivationPath := "m/44'/501'/0'/0'"
+	derivationPath := solanaDefaultDerivationPath
 	if customPath != "" {
 		derivationPath = customPath
 	}
@@ -133,42 +139,49 @@ func deriveSolanaPrivateKey(seed []byte, customPath string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid derivation path: must start with 'm'")
 	}
 
-	// Create the master key from the seed
-	masterKey, err := bip32.NewMasterKey(seed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create master key: %v", err)
-	}
+	key, chainCode := deriveSolanaMasterKey(seed)
 
 	// Iterate through the path components and derive child keys
-	currentKey := masterKey
 	for _, component := range components[1:] {
 		// Check if the component is hardened (ends with a single quote)
-		hardened := false
-		if strings.HasSuffix(component, "'") {
-			hardened = true
-			component = strings.TrimSuffix(component, "'")
+		if !strings.HasSuffix(component, "'") {
+			return nil, fmt.Errorf("invalid derivation path: Solana Ed25519 derivation requires hardened segments")
 		}
+		component = strings.TrimSuffix(component, "'")
 
 		// Convert component to uint32
 		index, err := strconv.ParseUint(component, 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid index in derivation path: %v", err)
 		}
-
-		// Harden the index if needed (add 0x80000000 for hardened)
-		if hardened {
-			index += 0x80000000
+		if index >= uint64(hardenedKeyStart) {
+			return nil, fmt.Errorf("invalid index in derivation path: %d is too large", index)
 		}
 
-		// Derive the child key at this index
-		currentKey, err = currentKey.NewChildKey(uint32(index))
-		if err != nil {
-			return nil, fmt.Errorf("failed to derive child key: %v", err)
-		}
+		key, chainCode = deriveSolanaChildKey(key, chainCode, uint32(index)+hardenedKeyStart)
 	}
 
-	// Return the private key bytes
-	return currentKey.Key, nil
+	return key, nil
+}
+
+func deriveSolanaMasterKey(seed []byte) ([]byte, []byte) {
+	return splitSolanaHMAC([]byte("ed25519 seed"), seed)
+}
+
+func deriveSolanaChildKey(key []byte, chainCode []byte, index uint32) ([]byte, []byte) {
+	data := make([]byte, 1+len(key)+4)
+	copy(data[1:], key)
+	binary.BigEndian.PutUint32(data[len(data)-4:], index)
+
+	return splitSolanaHMAC(chainCode, data)
+}
+
+func splitSolanaHMAC(hmacKey []byte, data []byte) ([]byte, []byte) {
+	mac := hmac.New(sha512.New, hmacKey)
+	mac.Write(data)
+	sum := mac.Sum(nil)
+
+	return sum[:32], sum[32:]
 }
 
 func (sol solana) GenerateFromPrivateKey(privateKeyBase58 string) (*KeyPair, error) {
